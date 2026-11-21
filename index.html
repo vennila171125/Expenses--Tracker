@@ -3,16 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Family Expense Tracker</title>
 <meta name="theme-color" content="#1f6f50">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Expenses">
+<title>Family Expense Tracker</title>
 <style>
 :root{--bg:#f3f5f1;--card:#fff;--ink:#1b2a22;--mute:#66756c;--line:#dfe5df;--accent:#1f6f50;--accent-ink:#fff;--bad:#b3392f;--track:#e3e9e3;
 box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#121915;--card:#1b251f;--ink:#e8efe9;--mute:#93a399;--line:#2b3a31;--accent:#5fc79a;--accent-ink:#0c1a12;--bad:#f08177;--track:#2b3a31;color-scheme:dark}}
-:root[data-theme="dark"]{--bg:#121915;--card:#1b251f;--ink:#e8efe9;--mute:#93a399;--line:#2b3a31;--accent:#5fc79a;--accent-ink:#0c1a12;--bad:#f08177;--track:#2b3a31;color-scheme:dark}
+@media (prefers-color-scheme:dark){:root{--bg:#121915;--card:#1b251f;--ink:#e8efe9;--mute:#93a399;--line:#2b3a31;--accent:#5fc79a;--accent-ink:#0c1a12;--bad:#f08177;--track:#2b3a31;color-scheme:dark}}
 *{box-sizing:border-box}
 html{scroll-padding-top:env(safe-area-inset-top,0px)}
 body{margin:0;background:var(--bg);color:var(--ink);font-family:"Segoe UI",system-ui,-apple-system,Roboto,sans-serif;font-size:16px;line-height:1.4}
@@ -60,15 +59,20 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
 <body>
 <main id="app"></main>
 <script>
-/* ---------- Config ---------- */
-var USERS = ['Vignesh', 'Vennila'];
-var PASSWORD = '1125';
-var KEY = 'family-expense-v2';
+/* ============ SETTINGS (change here if needed) ============ */
+var SB_URL = 'https://tbpbnwomifjgexddvpph.supabase.co';
+var SB_KEY = 'sb_publishable_MbqmZ0cfl3PxQMDAhIuvNg_c0ANa7Wj';
+/* Usernames and passwords. Add more members here, e.g. 'Name': 'password' */
+var USERS = { 'Vignesh': '1125', 'Vennila': '1125' };
+/* Only this user can delete entries */
+var DELETE_USER = 'Vennila';
+var CURRENCY = '₹';
+var POLL_MS = 15000;
+
+/* ============ PLAN HEADS AND EXPENSE TYPES ============ */
 var VEHICLES = ['Scooty', 'Bike', 'Car'];
 var LOANS = ['Home loan', 'Land loan', 'Car loan', 'Credit card – Vennila', 'Credit card – Vignesh'];
-/* Plan heads: the monthly plan is split across these */
 var PLAN = ['Rent'].concat(LOANS, ['Giving to parents', 'Petrol', 'Service', 'Household exp', 'Insurance', 'Travel', 'Medical', 'Shopping', 'Office']);
-/* Expense types: head = the plan head the amount is counted against */
 var CATS = [
   { n: 'Egg and meat', head: 'Household exp' },
   { n: 'Vegetables and fruits', head: 'Household exp' },
@@ -85,69 +89,94 @@ var CATS = [
   { n: 'Giving to parents', head: 'Giving to parents' }
 ];
 
-/* ---------- State ---------- */
+/* ============ STATE ============ */
 var user = null, tab = 'income', month = thisMonth();
-var state = { currency: '₹', months: {} };
-var db = null, ready = false, pending = false, dbMsg = 'Connecting to shared data…';
 var raw = { incomes: [], expenses: [], plans: {} };
+var months = {};
+var online = false, statusMsg = 'Connecting to shared data…', lastSig = '', pending = false;
 
-/* Build the month view from the shared database rows */
-function rebuild() {
-  var ms = {};
-  function g(k) { return ms[k] || (ms[k] = { incomes: [], expenses: [], plan: {} }); }
-  raw.incomes.forEach(function (i) { if (i.dt) g(i.dt.slice(0, 7)).incomes.push(i); });
-  raw.expenses.forEach(function (e) { if (e.dt) g(e.dt.slice(0, 7)).expenses.push(e); });
-  Object.keys(raw.plans).forEach(function (k) { g(k).plan = raw.plans[k]; });
-  state.months = ms;
-}
-function busy() { var a = document.activeElement; return a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName); }
-/* Re-draw when shared data changes, but never while someone is typing */
-function refresh() { rebuild(); if (!user) return; if (busy()) { pending = true; return; } render(); }
-document.addEventListener('focusout', function () {
-  if (!pending) return;
-  setTimeout(function () { if (!busy()) { pending = false; render(); } }, 300);
-});
-function fail(el, e) { el.textContent = 'Could not save: ' + ((e && (e.message || e.code)) || 'please try again'); }
-function statusBar() { return ready ? '' : '<div class="hint">' + esc(dbMsg) + '</div>'; }
-
-/* Connect to the shared database: entries are stored online, not on the phone */
-function connect() {
-  if (!window.claude || !claude.use) { dbMsg = 'Shared data is not available here. Open the app link while signed in to Claude.'; render(); return; }
-  claude.use('db').then(function (d) {
-    if (!d) { dbMsg = 'Shared data is not available. Open the app link while signed in to Claude.'; render(); return; }
-    db = d;
-    var got = 0;
-    var timer = setTimeout(function () { if (!ready) { dbMsg = 'Cannot reach shared data yet. Check your internet connection.'; refresh(); } }, 10000);
-    function onErr(e) { dbMsg = 'Shared data error: ' + ((e && (e.message || e.code)) || 'unknown'); refresh(); }
-    function sub(name, fn) {
-      var first = true;
-      db.collection(name).onSnapshot(function (s) {
-        fn(s);
-        if (first) { first = false; if (++got === 3) { ready = true; clearTimeout(timer); } }
-        refresh();
-      }, onErr);
-    }
-    sub('incomes', function (s) { raw.incomes = s.docs.map(function (x) { return x.data(); }); });
-    sub('expenses', function (s) { raw.expenses = s.docs.map(function (x) { return x.data(); }); });
-    sub('plans', function (s) { raw.plans = {}; s.docs.forEach(function (x) { raw.plans[x.id] = (x.data() || {}).plan || {}; }); });
-  }, function () { dbMsg = 'Shared data is not available.'; render(); });
-}
+/* ============ HELPERS ============ */
 function pad(n) { return String(n).padStart(2, '0'); }
 function thisMonth() { var d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1); }
 function nowLocal() { var d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()); }
 function defDt() { return month === thisMonth() ? nowLocal() : month + '-01T09:00'; }
 function fd(dt) { return new Date(dt).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }); }
-function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
-function fmt(n) { return state.currency + Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 }); }
-function sum(a) { return a.reduce(function (x, e) { return x + e.amount; }, 0); }
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+function fmt(n) { return CURRENCY + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }); }
+function sum(a) { return a.reduce(function (x, e) { return x + Number(e.amount || 0); }, 0); }
+function canDelete() { return user === DELETE_USER; }
+function delBtn(fn, id) { return canDelete() ? '<button onclick="' + fn + '(' + id + ')" aria-label="Delete entry">×</button>' : ''; }
+function busy() { var a = document.activeElement; return a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName); }
+function num(id) { var v = parseFloat(document.getElementById(id).value); return isFinite(v) ? v : 0; }
 
-function getM(k) { return state.months[k] || { incomes: [], expenses: [], plan: {} }; }
-function ensure(k) { if (!state.months[k]) state.months[k] = { incomes: [], expenses: [], plan: {} }; return state.months[k]; }
-function earlier(k) { return Object.keys(state.months).filter(function (x) { return x < k; }).sort(); }
+/* ============ SHARED DATABASE (Supabase) ============ */
+function api(method, path, body, prefer) {
+  var h = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  if (prefer) h.Prefer = prefer;
+  return fetch(SB_URL + '/rest/v1/' + path, {
+    method: method, headers: h, body: body ? JSON.stringify(body) : undefined
+  }).then(function (r) {
+    if (!r.ok) return r.text().then(function (t) { throw new Error(t || ('HTTP ' + r.status)); });
+    return r.status === 204 ? null : r.json();
+  });
+}
 
-/* All figures for a month. Unspent balance of the latest earlier month is carried forward. */
+function loadAll() {
+  return Promise.all([
+    api('GET', 'incomes?select=*&order=dt.asc'),
+    api('GET', 'expenses?select=*&order=dt.asc'),
+    api('GET', 'plans?select=*')
+  ]).then(function (res) {
+    var sig = JSON.stringify(res);
+    online = true; statusMsg = '';
+    if (sig !== lastSig) {
+      lastSig = sig;
+      raw.incomes = res[0]; raw.expenses = res[1]; raw.plans = {};
+      res[2].forEach(function (p) { raw.plans[p.month] = p.plan || {}; });
+      rebuild();
+      redraw();
+    }
+  }).catch(function (e) {
+    online = false;
+    statusMsg = 'Cannot reach shared data. Check your internet connection. (' + e.message + ')';
+    redraw();
+  });
+}
+
+/* Build month-by-month view from the shared rows */
+function rebuild() {
+  months = {};
+  function g(k) { return months[k] || (months[k] = { incomes: [], expenses: [], plan: {} }); }
+  raw.incomes.forEach(function (i) {
+    var x = { id: Number(i.id), type: i.type, amount: Number(i.amount), who: i.who, dt: i.dt };
+    if (x.dt) g(x.dt.slice(0, 7)).incomes.push(x);
+  });
+  raw.expenses.forEach(function (e) {
+    var x = { id: Number(e.id), cat: e.cat, head: e.head, amount: Number(e.amount), dt: e.dt, who: e.who, sub: e.sub || '', remark: e.remark || '' };
+    if (x.dt) g(x.dt.slice(0, 7)).expenses.push(x);
+  });
+  Object.keys(raw.plans).forEach(function (k) { g(k).plan = raw.plans[k]; });
+}
+
+/* Re-draw after a shared-data change, but not while someone is typing */
+function redraw() {
+  if (!user) return;
+  if (busy()) { pending = true; return; }
+  render();
+}
+document.addEventListener('focusout', function () {
+  if (!pending) return;
+  setTimeout(function () { if (!busy() && user) { pending = false; render(); } }, 300);
+});
+setInterval(function () { if (user) loadAll(); }, POLL_MS);
+
+/* ============ CALCULATIONS ============ */
+function getM(k) { return months[k] || { incomes: [], expenses: [], plan: {} }; }
+function earlier(k) { return Object.keys(months).filter(function (x) { return x < k; }).sort(); }
+/* Unspent balance of the latest earlier month is carried forward */
 function totals(k) {
-  var m = getM(k), prev = earlier(k), carry = prev.length ? totals(prev[prev.length - 1]).bal : 0;
+  var m = getM(k), prev = earlier(k);
+  var carry = prev.length ? totals(prev[prev.length - 1]).bal : 0;
   var sal = sum(m.incomes.filter(function (i) { return i.type === 'Salary'; }));
   var sav = sum(m.incomes.filter(function (i) { return i.type === 'Savings'; }));
   var spent = sum(m.expenses), total = carry + sal + sav;
@@ -156,15 +185,15 @@ function totals(k) {
 function headSpent(k, h) { return sum(getM(k).expenses.filter(function (e) { return e.head === h; })); }
 function planOf(k, h) { return Number(getM(k).plan[h]) || 0; }
 
-/* ---------- Screens ---------- */
+/* ============ SCREENS ============ */
 function render() {
   var app = document.getElementById('app');
   if (!user) { app.innerHTML = loginView(); return; }
-  var h = '<div class="top"><div><h1>Family expenses</h1><div class="who">Signed in as ' + user + '</div></div><button class="link" onclick="logout()">Log out</button></div>';
+  var h = '<div class="top"><div><h1>Family expenses</h1><div class="who">Signed in as ' + esc(user) + '</div></div><button class="link" onclick="logout()">Log out</button></div>';
+  h += statusBar();
   h += '<div class="tabs">' + [['income', 'Income'], ['exp', 'Expenses'], ['bal', 'Balance']].map(function (t) {
     return '<button class="' + (tab === t[0] ? 'on' : '') + '" onclick="setTab(\'' + t[0] + '\')">' + t[1] + '</button>';
   }).join('') + '</div>';
-  h += statusBar();
   h += '<label style="margin-top:0">Month</label><input id="mSel" type="month" value="' + month + '" onchange="setMonth(this.value)" style="margin-bottom:14px">';
   h += tab === 'income' ? incomeView() : tab === 'exp' ? expView() : balView();
   h += '<button class="btn ghost" style="margin-top:0" onclick="backup()">Download backup (CSV)</button>';
@@ -173,11 +202,17 @@ function render() {
   if (tab === 'income') planCalc();
 }
 
+function statusBar() {
+  if (online) return '';
+  return '<div class="hint">' + esc(statusMsg) + '</div>';
+}
+
 function loginView() {
   return '<div class="top"><h1>Family expenses</h1></div><div class="card"><h2>Log in</h2>'
     + '<label>Username</label><input id="lUser" autocapitalize="words" autocomplete="username">'
     + '<label>Password</label><input id="lPwd" type="password" inputmode="numeric" autocomplete="current-password">'
-    + '<div class="err" id="lErr"></div><button class="btn" style="margin-top:4px" onclick="login()">Log in</button></div>';
+    + '<div class="err" id="lErr"></div><button class="btn" style="margin-top:4px" onclick="login()">Log in</button>'
+    + (online ? '' : '<p class="note">' + esc(statusMsg) + '</p>') + '</div>';
 }
 
 function summary() {
@@ -192,13 +227,12 @@ function incomeView() {
   var h = summary() + '<div class="card"><h2>Add salary or savings</h2>'
     + '<div class="row"><div><label>Type</label><select id="iType"><option>Salary</option><option>Savings</option></select></div>'
     + '<div><label>Amount</label><input id="iAmt" type="number" inputmode="decimal" placeholder="0"></div></div>'
-    + '<div class="row"><div><label>Whose</label><select id="iWho">' + USERS.map(function (u) { return '<option' + (u === user ? ' selected' : '') + '>' + u + '</option>'; }).join('') + '</select></div>'
+    + '<div class="row"><div><label>Whose</label><select id="iWho">' + Object.keys(USERS).map(function (u) { return '<option' + (u === user ? ' selected' : '') + '>' + u + '</option>'; }).join('') + '</select></div>'
     + '<div><label>Date and time</label><input id="iDt" type="datetime-local" value="' + defDt() + '"></div></div>'
     + '<div class="err" id="iErr"></div><button class="btn" style="margin-top:4px" onclick="addInc()">Add amount</button>';
   if (t.carry) h += '<p class="note">Savings brought forward from last month: ' + fmt(t.carry) + ' (added automatically).</p>';
-  var list = m.incomes.slice().sort(function (a, b) { return a.dt < b.dt ? 1 : -1; });
-  list.forEach(function (i, n) {
-    h += '<div class="exp' + (n === 0 ? ' first' : '') + '"><div>' + i.type + '<small>' + esc(i.who) + ' · ' + fd(i.dt) + '</small></div>'
+  m.incomes.slice().sort(function (a, b) { return a.dt < b.dt ? 1 : -1; }).forEach(function (i, n) {
+    h += '<div class="exp' + (n === 0 ? ' first' : '') + '"><div>' + esc(i.type) + '<small>' + esc(i.who) + ' · ' + fd(i.dt) + '</small></div>'
       + '<div><span class="amt pos">+' + fmt(i.amount) + '</span>' + delBtn('delInc', i.id) + '</div></div>';
   });
   h += '</div>';
@@ -206,7 +240,7 @@ function incomeView() {
   h += '<div class="card"><h2>Plan the month</h2><p class="note" style="margin:0">Split your money across each head. Daily expenses are checked against this plan.</p>';
   PLAN.forEach(function (p) {
     var v = planOf(month, p);
-    h += '<div class="prow"><span>' + p + '</span><input class="pIn" data-h="' + esc(p) + '" type="number" inputmode="decimal" placeholder="0" value="' + (v || '') + '" oninput="planCalc()" aria-label="' + esc(p) + ' plan"></div>';
+    h += '<div class="prow"><span>' + esc(p) + '</span><input class="pIn" data-h="' + esc(p) + '" type="number" inputmode="decimal" placeholder="0" value="' + (v || '') + '" oninput="planCalc()" aria-label="' + esc(p) + ' plan"></div>';
   });
   h += '<div class="hint" id="pSum"></div><button class="btn" onclick="savePlan()">Save plan</button>';
   if (earlier(month).some(function (k) { return Object.keys(getM(k).plan).length; })) h += '<button class="btn ghost" onclick="copyPlan()">Copy last month’s plan</button>';
@@ -220,12 +254,12 @@ function expView() {
     + '<label>Expense type</label><select id="xCat" onchange="renderExtra()">' + CATS.map(function (c) { return '<option>' + c.n + '</option>'; }).join('') + '</select>'
     + '<div id="xExtra"></div>'
     + '<div class="row"><div><label>Amount</label><input id="xAmt" type="number" inputmode="decimal" placeholder="0"></div>'
-    + '<div><label>Who spends</label><select id="xWho">' + USERS.map(function (u) { return '<option' + (u === user ? ' selected' : '') + '>' + u + '</option>'; }).join('') + '</select></div></div>'
+    + '<div><label>Who spends</label><select id="xWho">' + Object.keys(USERS).map(function (u) { return '<option' + (u === user ? ' selected' : '') + '>' + u + '</option>'; }).join('') + '</select></div></div>'
     + '<label>Date and time</label><input id="xDt" type="datetime-local" value="' + defDt() + '" onchange="renderHint()">'
     + '<div class="hint" id="xHint"></div>'
     + '<div class="err" id="xErr"></div><button class="btn" style="margin-top:4px" onclick="addExp()">Add expense</button></div>';
-  var totalsBy = USERS.map(function (u) { return u + ' ' + fmt(sum(m.expenses.filter(function (e) { return e.who === u; }))); }).join(' · ');
-  h += '<div class="card"><h2>This month’s expenses</h2><div class="note" style="margin-bottom:6px">' + totalsBy + '</div>';
+  var byWho = Object.keys(USERS).map(function (u) { return u + ' ' + fmt(sum(m.expenses.filter(function (e) { return e.who === u; }))); }).join(' · ');
+  h += '<div class="card"><h2>This month’s expenses</h2><div class="note" style="margin-bottom:6px">' + byWho + '</div>';
   var list = m.expenses.slice().sort(function (a, b) { return a.dt < b.dt ? 1 : -1; });
   if (!list.length) h += '<div class="empty">Nothing logged yet. Add the first expense above.</div>';
   list.forEach(function (e, i) {
@@ -250,10 +284,11 @@ function balView() {
 
   var planned = 0, rows = '';
   PLAN.forEach(function (p) {
-    var pl = planOf(month, p), sp = headSpent(month, p); planned += pl;
+    var pl = planOf(month, p), sp = headSpent(month, p);
+    planned += pl;
     if (!pl && !sp) return;
     var left = pl - sp, pct = pl > 0 ? Math.min(100, sp / pl * 100) : 100;
-    rows += '<div class="exp first" style="display:block;border-top:1px solid var(--line)"><div style="display:flex;justify-content:space-between"><span>' + p + '</span><span class="amt ' + (left < 0 ? 'neg' : 'pos') + '">' + fmt(left) + ' left</span></div>'
+    rows += '<div class="exp first" style="display:block;border-top:1px solid var(--line)"><div style="display:flex;justify-content:space-between"><span>' + esc(p) + '</span><span class="amt ' + (left < 0 ? 'neg' : 'pos') + '">' + fmt(left) + ' left</span></div>'
       + '<div class="bar"><i class="' + (left < 0 ? 'over' : '') + '" style="width:' + pct + '%"></i></div>'
       + '<small>' + (pl ? 'Spent ' + fmt(sp) + ' of ' + fmt(pl) : 'Spent ' + fmt(sp) + ' · not in plan') + '</small></div>';
   });
@@ -276,7 +311,7 @@ function balView() {
   return h + '</div>';
 }
 
-/* ---------- Dynamic bits ---------- */
+/* ============ DYNAMIC FORM PARTS ============ */
 function curCat() { return CATS.filter(function (x) { return x.n === document.getElementById('xCat').value; })[0]; }
 function curHead() { var c = curCat(); return c.byHead ? document.getElementById('xSub').value : c.head; }
 
@@ -291,83 +326,110 @@ function renderHint() {
   var head = curHead(), dt = document.getElementById('xDt').value, k = dt ? dt.slice(0, 7) : month;
   var pl = planOf(k, head), sp = headSpent(k, head), left = pl - sp;
   document.getElementById('xHint').innerHTML = pl
-    ? head + ': planned ' + fmt(pl) + ' · spent ' + fmt(sp) + ' · <b class="' + (left < 0 ? 'neg' : 'pos') + '">' + fmt(left) + ' left</b>'
-    : head + ': no plan set. Spent so far ' + fmt(sp) + '.';
+    ? esc(head) + ': planned ' + fmt(pl) + ' · spent ' + fmt(sp) + ' · <b class="' + (left < 0 ? 'neg' : 'pos') + '">' + fmt(left) + ' left</b>'
+    : esc(head) + ': no plan set. Spent so far ' + fmt(sp) + '.';
 }
 function planCalc() {
-  var s = 0; [].forEach.call(document.querySelectorAll('.pIn'), function (i) { s += parseFloat(i.value) || 0; });
-  var av = totals(month).total, left = av - s, el = document.getElementById('pSum');
-  if (el) el.innerHTML = 'Planned ' + fmt(s) + ' of ' + fmt(av) + ' · <b class="' + (left < 0 ? 'neg' : '') + '">Unallocated ' + fmt(left) + '</b>';
+  var s = 0;
+  [].forEach.call(document.querySelectorAll('.pIn'), function (i) { s += parseFloat(i.value) || 0; });
+  var left = totals(month).total - s, el = document.getElementById('pSum');
+  if (el) el.innerHTML = 'Planned ' + fmt(s) + ' of ' + fmt(totals(month).total) + ' · <b class="' + (left < 0 ? 'neg' : '') + '">Unallocated ' + fmt(left) + '</b>';
 }
 
-/* ---------- Actions ---------- */
+/* ============ ACTIONS ============ */
 function login() {
-  var u = document.getElementById('lUser').value.trim().toLowerCase(), p = document.getElementById('lPwd').value;
-  var match = USERS.filter(function (x) { return x.toLowerCase() === u; })[0];
-  if (match && p === PASSWORD) { user = match; render(); }
+  var typed = document.getElementById('lUser').value.trim().toLowerCase();
+  var p = document.getElementById('lPwd').value;
+  var name = Object.keys(USERS).filter(function (x) { return x.toLowerCase() === typed; })[0];
+  if (name && USERS[name] === p) { user = name; loadAll(); render(); }
   else document.getElementById('lErr').textContent = 'Wrong username or password. Try again.';
 }
 function logout() { user = null; render(); }
 function setTab(t) { tab = t; render(); }
 function setMonth(v) { if (v) { month = v; render(); } }
-function num(id) { var v = parseFloat(document.getElementById(id).value); return isFinite(v) ? v : 0; }
+
+function fail(el, e) { el.textContent = 'Could not save: ' + (e && e.message ? e.message : 'please try again'); }
 
 function addInc() {
-  var amt = num('iAmt'), dt = document.getElementById('iDt').value, err = document.getElementById('iErr');
+  var err = document.getElementById('iErr'), amt = num('iAmt'), dt = document.getElementById('iDt').value;
   if (amt <= 0) { err.textContent = 'Enter the amount.'; return; }
   if (!dt) { err.textContent = 'Pick the date and time.'; return; }
-  if (!db) { err.textContent = dbMsg; return; }
   var k = dt.slice(0, 7), id = Date.now();
-  db.doc('incomes/' + id).set({ id: id, type: document.getElementById('iType').value, amount: amt, who: document.getElementById('iWho').value, dt: dt })
-    .then(function () { month = k; render(); }, function (e) { fail(err, e); });
+  api('POST', 'incomes', { id: id, type: document.getElementById('iType').value, amount: amt, who: document.getElementById('iWho').value, dt: dt }, 'resolution=merge-duplicates')
+    .then(function () { month = k; return loadAll(); })
+    .then(function () { render(); })
+    .catch(function (e) { fail(err, e); });
 }
+
 function addExp() {
   var c = curCat(), err = document.getElementById('xErr'), amt = num('xAmt'), dt = document.getElementById('xDt').value;
   var remark = c.remark ? document.getElementById('xRemark').value.trim() : '';
   if (amt <= 0) { err.textContent = 'Enter the amount.'; return; }
   if (!dt) { err.textContent = 'Pick the date and time.'; return; }
   if (c.remark && !remark) { err.textContent = 'Add a remark for ' + c.n + '.'; return; }
-  if (!db) { err.textContent = dbMsg; return; }
   var k = dt.slice(0, 7), id = Date.now();
-  db.doc('expenses/' + id).set({ id: id, cat: c.n, head: curHead(), amount: amt, dt: dt, who: document.getElementById('xWho').value, sub: c.sub ? document.getElementById('xSub').value : '', remark: remark })
-    .then(function () { month = k; render(); }, function (e) { fail(err, e); });
+  api('POST', 'expenses', {
+    id: id, cat: c.n, head: curHead(), amount: amt, dt: dt,
+    who: document.getElementById('xWho').value,
+    sub: c.sub ? document.getElementById('xSub').value : '', remark: remark
+  }, 'resolution=merge-duplicates')
+    .then(function () { month = k; return loadAll(); })
+    .then(function () { render(); })
+    .catch(function (e) { fail(err, e); });
 }
-/* Backup: save every entry and plan as a CSV file the family can open in Excel or Google Sheets */
-function csvCell(v) { var s = String(v == null ? '' : v).replace(/"/g, '""'); return '"' + s + '"'; }
-function backup() {
-  var rows = [['Type', 'Month', 'Date and time', 'Category or type', 'Head', 'Sub item', 'Remark', 'Who', 'Amount']];
-  raw.incomes.slice().sort(function (a, b) { return a.dt < b.dt ? -1 : 1; }).forEach(function (i) { rows.push(['Income', i.dt.slice(0, 7), i.dt, i.type, '', '', '', i.who, i.amount]); });
-  raw.expenses.slice().sort(function (a, b) { return a.dt < b.dt ? -1 : 1; }).forEach(function (e) { rows.push(['Expense', e.dt.slice(0, 7), e.dt, e.cat, e.head, e.sub || '', e.remark || '', e.who, e.amount]); });
-  Object.keys(raw.plans).sort().forEach(function (k) { Object.keys(raw.plans[k]).forEach(function (h) { rows.push(['Plan', k, '', '', h, '', '', '', raw.plans[k][h]]); }); });
-  var csv = '\uFEFF' + rows.map(function (r) { return r.map(csvCell).join(','); }).join('\r\n');
-  var name = 'family-expenses-backup-' + thisMonth() + '.csv';
-  if (!window.claude || !claude.use) { dbMsg = 'Backup is not available here.'; render(); return; }
-  claude.use('downloads').then(function (dl) {
-    if (!dl) { dbMsg = 'Backup is not available here.'; render(); return; }
-    return dl.save({ filename: name, data: csv });
-  }).catch(function (e) {
-    if (e && e.code === 'declined') return;
-    dbMsg = 'Backup could not be saved: ' + ((e && (e.message || e.code)) || 'please try again');
-    render();
-  });
+
+function delInc(id) {
+  if (!canDelete()) return;
+  if (!confirm('Delete this salary or savings entry?')) return;
+  api('DELETE', 'incomes?id=eq.' + id).then(loadAll).then(render).catch(function (e) { alert('Could not delete: ' + e.message); });
 }
-function canDelete() { return user === 'Vennila'; }
-function delBtn(fn, id) { return canDelete() ? '<button onclick="' + fn + '(' + id + ')" aria-label="Delete entry">×</button>' : ''; }
-function delInc(id) { if (canDelete() && db) db.doc('incomes/' + id).delete(); }
-function delExp(id) { if (canDelete() && db) db.doc('expenses/' + id).delete(); }
+function delExp(id) {
+  if (!canDelete()) return;
+  if (!confirm('Delete this expense?')) return;
+  api('DELETE', 'expenses?id=eq.' + id).then(loadAll).then(render).catch(function (e) { alert('Could not delete: ' + e.message); });
+}
+
 function savePlan() {
   var p = {};
   [].forEach.call(document.querySelectorAll('.pIn'), function (i) { var v = parseFloat(i.value) || 0; if (v) p[i.getAttribute('data-h')] = v; });
-  if (db) db.doc('plans/' + month).set({ plan: p });
+  api('POST', 'plans', { month: month, plan: p }, 'resolution=merge-duplicates')
+    .then(loadAll).then(render)
+    .catch(function (e) { alert('Could not save the plan: ' + e.message); });
 }
 function copyPlan() {
   var ks = earlier(month).filter(function (k) { return Object.keys(getM(k).plan).length; });
   if (!ks.length) return;
-  if (db) db.doc('plans/' + month).set({ plan: JSON.parse(JSON.stringify(getM(ks[ks.length - 1]).plan)) });
+  var p = JSON.parse(JSON.stringify(getM(ks[ks.length - 1]).plan));
+  api('POST', 'plans', { month: month, plan: p }, 'resolution=merge-duplicates')
+    .then(loadAll).then(render)
+    .catch(function (e) { alert('Could not copy the plan: ' + e.message); });
 }
 
+/* Backup: all entries and plans as a CSV file for Excel or Google Sheets */
+function csvCell(v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; }
+function backup() {
+  var rows = [['Type', 'Month', 'Date and time', 'Category or type', 'Head', 'Sub item', 'Remark', 'Who', 'Amount']];
+  raw.incomes.slice().sort(function (a, b) { return a.dt < b.dt ? -1 : 1; }).forEach(function (i) {
+    rows.push(['Income', i.dt.slice(0, 7), i.dt, i.type, '', '', '', i.who, i.amount]);
+  });
+  raw.expenses.slice().sort(function (a, b) { return a.dt < b.dt ? -1 : 1; }).forEach(function (e) {
+    rows.push(['Expense', e.dt.slice(0, 7), e.dt, e.cat, e.head, e.sub || '', e.remark || '', e.who, e.amount]);
+  });
+  Object.keys(raw.plans).sort().forEach(function (k) {
+    Object.keys(raw.plans[k]).forEach(function (h) { rows.push(['Plan', k, '', '', h, '', '', '', raw.plans[k][h]]); });
+  });
+  var csv = '\uFEFF' + rows.map(function (r) { return r.map(csvCell).join(','); }).join('\r\n');
+  var blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'family-expenses-backup-' + thisMonth() + '.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+}
+
+/* ============ START ============ */
 render();
-connect();
+loadAll();
 </script>
 </body>
 </html>
